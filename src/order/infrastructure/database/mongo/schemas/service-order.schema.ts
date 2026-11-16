@@ -48,6 +48,7 @@ export type ServiceOrderBudgetDoc = {
   total: number;
   approved: boolean;
   approvedAt?: Date | null;
+  budgetId?: string | null;
 };
 
 export type ServiceOrderStatusHistoryDoc = {

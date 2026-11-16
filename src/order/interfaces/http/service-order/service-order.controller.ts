@@ -172,9 +172,9 @@ export class ServiceOrderController {
   @Post(':id/budget')
   @AuthRoles(UserRole.ADMIN, UserRole.ATENDENTE, UserRole.MECANICO)
   @ApiOperation({
-    summary: 'Gerar orçamento',
+    summary: 'Solicitar geração de orçamento (inicia saga)',
     description:
-      'Calcula totais e FIFO das peças; status passa a WAITING_APPROVAL (aguardando aprovação). Na primeira vez nesse status, com diagnóstico já registrado, o orçamento é “enviado” ao cliente (porta de notificação). Regenerações do orçamento em WAITING_APPROVAL não disparam novo envio. O cliente pode consultar em GET /public/service-orders/:id/budget?document=...',
+      'Marca a OS como WAITING_BUDGET e publica order.budget.requested. O billing cotiza peças e devolve billing.budget.generated.',
   })
   @ApiResponse({ status: 200, type: ServiceOrderResponseDto })
   async budget(@Param('id') id: string): Promise<ServiceOrderResponseDto> {
@@ -185,11 +185,11 @@ export class ServiceOrderController {
   @Post(':id/approve-budget')
   @AuthRoles(UserRole.ADMIN, UserRole.ATENDENTE)
   @ApiOperation({
-    summary:
-      'Aprovar orçamento (valida estoque, baixa FIFO, status IN_EXECUTION; idempotente se já em execução)',
+    summary: 'Aprovar orçamento (saga)',
+    description:
+      'Marca o orçamento como aprovado e publica order.budget.approved. Estoque e pagamento seguem assíncronos (stock → billing). Idempotente se a OS já estiver IN_EXECUTION.',
   })
   @ApiResponse({ status: 200, type: ServiceOrderResponseDto })
-  @ApiResponse({ status: 409, description: 'Estoque insuficiente' })
   async approve(@Param('id') id: string): Promise<ServiceOrderResponseDto> {
     const order = await this.approveBudget.execute(id);
     return ServiceOrderResponseDto.toDto(order);
@@ -198,8 +198,9 @@ export class ServiceOrderController {
   @Post(':id/reject-budget')
   @AuthRoles(UserRole.ADMIN, UserRole.ATENDENTE)
   @ApiOperation({
-    summary:
-      'Reprovar orçamento (regras na entidade; encerra OS em CANCELLED, sem baixa de estoque)',
+    summary: 'Reprovar orçamento (cancela a OS)',
+    description:
+      'Cancela a OS e publica order.budget.rejected + order.cancelled para compensar billing/estoque.',
   })
   @ApiResponse({ status: 200, type: ServiceOrderResponseDto })
   async reject(

@@ -69,6 +69,9 @@ export function documentToServiceOrder(doc: ServiceOrderDoc): ServiceOrder {
           total: Number(doc.budget.total),
           approved: Boolean(doc.budget.approved),
           approvedAt: toDate(doc.budget.approvedAt),
+          budgetId: doc.budget.budgetId
+            ? String(doc.budget.budgetId)
+            : undefined,
         }
       : undefined,
     statusHistory: (doc.statusHistory ?? []).map((h) => ({
@@ -128,6 +131,7 @@ export function serviceOrderToDocument(order: ServiceOrder): ServiceOrderDoc {
           total: budget.total,
           approved: budget.approved,
           approvedAt: budget.approvedAt ?? null,
+          budgetId: budget.budgetId ?? null,
         }
       : null,
     statusHistory: order.statusHistory.map((h) => ({

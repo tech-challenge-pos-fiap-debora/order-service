@@ -45,7 +45,10 @@ export class OpenServiceOrderUseCase {
 
   async execute(input: OpenServiceOrderInput): Promise<ServiceOrder> {
     const client = await this.clientProvisioning.getOrCreate(input.client);
-    const vehicle = await this.vehicleProvisioning.getOrCreate(input.vehicle);
+    const vehicle = await this.vehicleProvisioning.getOrCreate({
+      ...input.vehicle,
+      clientId: client.id,
+    });
     const serviceLines = await this.resolveServiceLines(input.services ?? []);
     const partLines = await this.resolvePartLines(input.parts ?? []);
 

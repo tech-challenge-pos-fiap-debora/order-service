@@ -5,6 +5,7 @@ export type ProvisionVehicleInput = {
   brand: string;
   model: string;
   year: number;
+  clientId?: string;
 };
 
 export interface VehicleProvisioningPort {

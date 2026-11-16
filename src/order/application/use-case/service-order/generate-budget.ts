@@ -1,14 +1,10 @@
+import { randomUUID } from 'crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import {
   BusinessRuleViolationError,
   EntityNotFoundError,
 } from '../../../../shared/domain/errors';
-import type {
-  Budget,
-  BudgetItem,
-} from '../../../domain/entities/service-order';
 import { ServiceOrder } from '../../../domain/entities/service-order';
-import { ServiceOrderStatus } from '../../../domain/entities/service-order-status';
 import type { ServiceOrderRepositoryInterface } from '../../../domain/repositories/service-order.repository';
 import { SERVICE_ORDER_REPOSITORY } from '../../../domain/repositories/tokens';
 import {
@@ -16,14 +12,14 @@ import {
   type ClientLookupPort,
 } from '../../../domain/ports/client-lookup.port';
 import {
-  BUDGET_DELIVERY_NOTIFIER,
-  type BudgetDeliveryNotifier,
-} from '../../../domain/ports/budget-delivery-notifier.port';
-import {
-  STOCK_SERVICE,
-  type StockServicePort,
-} from '../../../../shared/domain/ports/stock-service.port';
+  EVENT_PUBLISHER,
+  type EventPublisherPort,
+} from '../../../../shared/domain/ports/event-publisher.port';
 
+/**
+ * Inicia a saga de orçamento: marca WAITING_BUDGET e publica
+ * `order.budget.requested` para o billing cotar peças e gerar o orçamento.
+ */
 @Injectable()
 export class GenerateBudgetUseCase {
   constructor(
@@ -31,10 +27,8 @@ export class GenerateBudgetUseCase {
     private readonly orderRepo: ServiceOrderRepositoryInterface,
     @Inject(CLIENT_LOOKUP)
     private readonly clientLookup: ClientLookupPort,
-    @Inject(BUDGET_DELIVERY_NOTIFIER)
-    private readonly budgetDelivery: BudgetDeliveryNotifier,
-    @Inject(STOCK_SERVICE)
-    private readonly stock: StockServicePort,
+    @Inject(EVENT_PUBLISHER)
+    private readonly events: EventPublisherPort,
   ) {}
 
   async execute(id: string): Promise<ServiceOrder> {
@@ -53,97 +47,70 @@ export class GenerateBudgetUseCase {
       );
     }
 
-    const items: BudgetItem[] = [];
-    let servicesTotal = 0;
-    for (const line of order.serviceLines) {
-      const total = line.unitPrice * line.quantity;
-      servicesTotal += total;
-      items.push({
-        type: 'SERVICE',
-        referenceId: line.catalogServiceId,
-        description: line.name,
-        quantity: line.quantity,
-        unitPrice: line.unitPrice,
-        total,
-      });
-    }
-
-    const partDemand = order.aggregatePartDemand();
-    const quote = await this.stock.quoteFifoCost(
-      Array.from(partDemand.entries()).map(([productCode, required]) => ({
-        productCode,
-        required,
-      })),
-    );
-    const quoteByCode = new Map(quote.map((q) => [q.productCode, q]));
-    const nameByCode = new Map<string, string>();
-    for (const sl of order.serviceLines) {
-      for (const dp of sl.defaultParts) {
-        if (dp.name?.trim() && !nameByCode.has(dp.productCode)) {
-          nameByCode.set(dp.productCode, dp.name);
-        }
-      }
-    }
-    for (const pl of order.partLines) {
-      if (pl.name?.trim()) {
-        nameByCode.set(pl.productCode, pl.name);
-      }
-    }
-    let partsTotal = 0;
-    for (const [productCode, quantity] of partDemand.entries()) {
-      const q = quoteByCode.get(productCode);
-      const totalCost = q?.totalCost ?? 0;
-      const unitPrice = q?.unitPrice ?? 0;
-      partsTotal += totalCost;
-      items.push({
-        type: 'PART',
-        referenceId: productCode,
-        description: nameByCode.get(productCode) ?? productCode,
-        quantity,
-        unitPrice: Number.isFinite(unitPrice) ? unitPrice : 0,
-        total: totalCost,
-      });
-    }
-
-    const budget: Budget = {
-      items,
-      servicesTotal,
-      partsTotal,
-      total: servicesTotal + partsTotal,
-      approved: false,
-    };
-
-    const statusBeforeApply = order.status;
-
     try {
-      order.applyBudget(budget);
+      order.markWaitingBudget();
     } catch (e) {
       throw new BusinessRuleViolationError(
         e instanceof Error ? e.message : 'Invalid operation',
       );
     }
 
-    const saved = await this.orderRepo.save(order);
-
-    const becameWaitingApproval =
-      statusBeforeApply !== ServiceOrderStatus.WAITING_APPROVAL;
-    if (saved?.budget && becameWaitingApproval) {
-      const client = await this.clientLookup.findById(saved.clientId);
-      if (!client) {
-        throw new EntityNotFoundError(`Client "${saved.clientId}" not found`);
-      }
-      await this.budgetDelivery.notifyBudgetReady({
-        serviceOrderId: saved.id,
-        clientDocument: saved.clientDocument,
-        clientName: saved.clientName,
-        clientEmail: client.email,
-        vehiclePlate: saved.vehiclePlate,
-        vehicleBrand: saved.vehicleBrand,
-        vehicleModel: saved.vehicleModel,
-        vehicleYear: saved.vehicleYear,
-        budget: saved.budget,
-      });
+    const saved = (await this.orderRepo.save(order))!;
+    const client = await this.clientLookup.findById(saved.clientId);
+    if (!client) {
+      throw new EntityNotFoundError(`Client "${saved.clientId}" not found`);
     }
+
+    const partDemandMap = saved.aggregatePartDemand();
+    const nameByCode = new Map<string, string>();
+    for (const sl of saved.serviceLines) {
+      for (const dp of sl.defaultParts) {
+        if (dp.name?.trim() && !nameByCode.has(dp.productCode)) {
+          nameByCode.set(dp.productCode, dp.name);
+        }
+      }
+    }
+    for (const pl of saved.partLines) {
+      if (pl.name?.trim()) nameByCode.set(pl.productCode, pl.name);
+    }
+
+    await this.events.publish({
+      eventId: randomUUID(),
+      type: 'order.budget.requested',
+      version: 1,
+      occurredAt: new Date().toISOString(),
+      correlationId: saved.id,
+      producer: 'order-service',
+      payload: {
+        serviceOrderId: saved.id,
+        client: {
+          id: client.id,
+          document: client.document,
+          name: client.name,
+          email: client.email,
+        },
+        vehicle: {
+          plate: saved.vehiclePlate,
+          brand: saved.vehicleBrand,
+          model: saved.vehicleModel,
+          year: saved.vehicleYear,
+        },
+        serviceLines: saved.serviceLines.map((l) => ({
+          catalogServiceId: l.catalogServiceId,
+          name: l.name,
+          unitPrice: l.unitPrice,
+          quantity: l.quantity,
+        })),
+        partDemand: Array.from(partDemandMap.entries()).map(
+          ([productCode, quantity]) => ({
+            productCode,
+            name: nameByCode.get(productCode),
+            quantity,
+          }),
+        ),
+      },
+    });
+
     return saved!;
   }
 }

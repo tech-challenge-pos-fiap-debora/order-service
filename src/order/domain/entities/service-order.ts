@@ -53,6 +53,8 @@ export type Budget = {
   total: number;
   approved: boolean;
   approvedAt?: Date;
+  /** Id do orçamento no billing-service (saga). */
+  budgetId?: string;
 };
 
 export type StatusHistoryEntry = {
@@ -412,7 +414,10 @@ export class ServiceOrder {
   private invalidateBudget(): void {
     if (this.props.budget) {
       this.props.budget = undefined;
-      if (this.props.status === ServiceOrderStatus.WAITING_APPROVAL) {
+      if (
+        this.props.status === ServiceOrderStatus.WAITING_APPROVAL ||
+        this.props.status === ServiceOrderStatus.WAITING_BUDGET
+      ) {
         this.transitionTo(ServiceOrderStatus.IN_DIAGNOSIS);
       }
     }
@@ -473,8 +478,82 @@ export class ServiceOrder {
     this.transitionTo(ServiceOrderStatus.CANCELLED);
   }
 
+  /** Saga: aguardando billing gerar o orçamento. */
+  markWaitingBudget(): void {
+    if (
+      this.props.status !== ServiceOrderStatus.IN_DIAGNOSIS &&
+      this.props.status !== ServiceOrderStatus.RECEIVED &&
+      this.props.status !== ServiceOrderStatus.WAITING_BUDGET
+    ) {
+      throw new Error(
+        `Cannot request budget when status is ${this.props.status}`,
+      );
+    }
+    if (this.props.status !== ServiceOrderStatus.WAITING_BUDGET) {
+      this.transitionTo(ServiceOrderStatus.WAITING_BUDGET);
+    } else {
+      this.touch();
+    }
+  }
+
+  /** Saga: billing falhou ao gerar orçamento — volta ao diagnóstico. */
+  revertToDiagnosis(reason?: string): void {
+    if (this.props.status !== ServiceOrderStatus.WAITING_BUDGET) {
+      throw new Error(
+        `Cannot revert to diagnosis when status is ${this.props.status}`,
+      );
+    }
+    if (reason?.trim()) {
+      this.props.cancellationReason = reason.trim();
+    }
+    this.transitionTo(ServiceOrderStatus.IN_DIAGNOSIS);
+  }
+
+  /** Saga: pagamento criado — aguardando confirmação. */
+  markWaitingPayment(): void {
+    if (
+      this.props.status !== ServiceOrderStatus.WAITING_APPROVAL &&
+      this.props.status !== ServiceOrderStatus.WAITING_PAYMENT
+    ) {
+      throw new Error(
+        `Cannot wait payment when status is ${this.props.status}`,
+      );
+    }
+    if (!this.props.budget?.approved) {
+      throw new Error('Cannot wait payment without an approved budget');
+    }
+    if (this.props.status !== ServiceOrderStatus.WAITING_PAYMENT) {
+      this.transitionTo(ServiceOrderStatus.WAITING_PAYMENT);
+    } else {
+      this.touch();
+    }
+  }
+
+  /** Saga: cancela OS por falha de estoque/pagamento. */
+  cancelBySaga(reason?: string): void {
+    if (this.props.status === ServiceOrderStatus.CANCELLED) {
+      this.touch();
+      return;
+    }
+    if (
+      this.props.status === ServiceOrderStatus.FINISHED ||
+      this.props.status === ServiceOrderStatus.DELIVERED ||
+      this.props.status === ServiceOrderStatus.IN_EXECUTION
+    ) {
+      throw new Error(
+        `Cannot cancel by saga when status is ${this.props.status}`,
+      );
+    }
+    this.props.cancellationReason =
+      reason?.trim() || 'Cancelado pela saga (falha em etapa distribuída)';
+    this.transitionTo(ServiceOrderStatus.CANCELLED);
+  }
+
   startExecution(): void {
-    if (this.props.status !== ServiceOrderStatus.WAITING_APPROVAL) {
+    if (
+      this.props.status !== ServiceOrderStatus.WAITING_APPROVAL &&
+      this.props.status !== ServiceOrderStatus.WAITING_PAYMENT
+    ) {
       throw new Error(
         `Cannot start execution when status is ${this.props.status}`,
       );

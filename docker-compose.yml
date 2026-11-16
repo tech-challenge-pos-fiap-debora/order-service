@@ -12,8 +12,12 @@ services:
     restart: unless-stopped
     ports:
       - '3003:3000'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     depends_on:
       order-mongo:
+        condition: service_healthy
+      localstack:
         condition: service_healthy
     environment:
       - NODE_ENV=development
@@ -21,13 +25,22 @@ services:
       - MONGODB_DB=order
       - JWT_SECRET=${JWT_SECRET:-altere-este-segredo}
       - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-1d}
-      - IDENTITY_SERVICE_URL=${IDENTITY_SERVICE_URL:-}
-      - STOCK_SERVICE_URL=${STOCK_SERVICE_URL:-}
+      - IDENTITY_SERVICE_URL=http://host.docker.internal:3001
+      - STOCK_SERVICE_URL=http://host.docker.internal:3002
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_ENDPOINT_URL=http://order-localstack:4566
+      - SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:oficina-domain-events
+      - SNS_FANOUT_ENDPOINTS=http://order-localstack:4566,http://stock-localstack:4566,http://billing-localstack:4566
+      - SQS_QUEUE_URL=http://order-localstack:4566/000000000000/order-events
       - SERVICE_NAME=order-service
       - NEW_RELIC_APP_NAME=${NEW_RELIC_APP_NAME:-order-service}
       - NEW_RELIC_LABELS=${NEW_RELIC_LABELS:-service:order-service;component:order}
       - NEW_RELIC_ENABLED=${NEW_RELIC_ENABLED:-false}
       - PORT=3000
+    networks:
+      - oficina
     volumes:
       - .:/order
       - order_node_modules:/order/node_modules
@@ -47,7 +60,37 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+    networks:
+      - oficina
+
+  localstack:
+    image: localstack/localstack:4.3
+    container_name: order-localstack
+    ports:
+      - '4567:4566'
+    environment:
+      - SERVICES=sns,sqs
+      - DEBUG=0
+      - AWS_DEFAULT_REGION=us-east-1
+      - OFICINA_QUEUE_NAME=order-events
+    volumes:
+      - order-localstack:/var/lib/localstack
+      - ./scripts/localstack-ready.sh:/etc/localstack/init/ready.d/10-oficina-sns-sqs.sh:ro
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:4566/_localstack/health']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    networks:
+      - oficina
 
 volumes:
   order-mongodata:
   order_node_modules:
+  order-localstack:
+
+networks:
+  oficina:
+    name: oficina-net
+    external: true

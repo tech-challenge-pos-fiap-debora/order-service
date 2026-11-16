@@ -12,7 +12,7 @@ import { IntegrationHttpClient } from './integration-http.client';
 
 /**
  * Stub HTTP do stock-service (produtos). O lookup devolve id + code + name.
- * Contrato esperado: `GET /product/:code` e `POST /product/get-or-create`.
+ * Contrato esperado: `GET /stock/product/:code` e `POST /product/get-or-create`.
  */
 @Injectable()
 export class HttpStockProductAdapter
@@ -32,7 +32,7 @@ export class HttpStockProductAdapter
     const raw = await this.http.request<ProductSnapshot>(
       'stock-service',
       'GET',
-      `/product/${encodeURIComponent(code)}`,
+      `/stock/product/${encodeURIComponent(code)}`,
       { allowNotFound: true },
     );
     return raw ? { id: raw.id, code: raw.code, name: raw.name } : null;

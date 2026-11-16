@@ -44,6 +44,7 @@ import {
   InMemoryVehicleProvisioning,
   restoreOrder,
   SpyBudgetDeliveryNotifier,
+  SpyEventPublisher,
 } from './__fakes__/service-order.fakes';
 
 describe('Service order use cases', () => {
@@ -376,38 +377,22 @@ describe('Service order use cases', () => {
   });
 
   describe('GenerateBudgetUseCase', () => {
-    it('gera orçamento, muda status e notifica cliente', async () => {
+    it('marca WAITING_BUDGET e publica order.budget.requested', async () => {
       const order = createDiagnosedOrderWithService('os-1');
       const orderRepo = new InMemoryServiceOrderRepository().seed(order);
       const clientLookup = new InMemoryClientLookup().seed(
         defaultClientSnapshot(),
       );
-      const notifier = new SpyBudgetDeliveryNotifier();
-      const stock = new InMemoryStockService(
-        [],
-        [
-          {
-            productCode: TEST_PRODUCT_CODE,
-            required: 1,
-            totalCost: 50,
-            unitPrice: 50,
-          },
-        ],
-      );
-      const uc = new GenerateBudgetUseCase(
-        orderRepo,
-        clientLookup,
-        notifier,
-        stock,
-      );
+      const events = new SpyEventPublisher();
+      const uc = new GenerateBudgetUseCase(orderRepo, clientLookup, events);
 
       const updated = await uc.execute('os-1');
 
-      expect(updated.status).toBe(ServiceOrderStatus.WAITING_APPROVAL);
-      expect(updated.budget?.total).toBe(200);
-      expect(notifier.calls).toHaveLength(1);
-      expect(notifier.calls[0].serviceOrderId).toBe('os-1');
-      expect(notifier.calls[0].clientEmail).toBe('maria@example.com');
+      expect(updated.status).toBe(ServiceOrderStatus.WAITING_BUDGET);
+      expect(updated.budget).toBeUndefined();
+      expect(events.events).toHaveLength(1);
+      expect(events.events[0].type).toBe('order.budget.requested');
+      expect(events.events[0].correlationId).toBe('os-1');
     });
 
     it('exige diagnóstico antes de gerar orçamento', async () => {
@@ -422,8 +407,7 @@ describe('Service order use cases', () => {
       const uc = new GenerateBudgetUseCase(
         new InMemoryServiceOrderRepository().seed(order),
         new InMemoryClientLookup().seed(defaultClientSnapshot()),
-        new SpyBudgetDeliveryNotifier(),
-        new InMemoryStockService(),
+        new SpyEventPublisher(),
       );
 
       await expect(uc.execute('os-1')).rejects.toBeInstanceOf(
@@ -433,56 +417,30 @@ describe('Service order use cases', () => {
   });
 
   describe('ApproveBudgetUseCase', () => {
-    it('aprova orçamento, baixa estoque e inicia execução', async () => {
+    it('aprova orçamento e publica order.budget.approved sem iniciar execução', async () => {
       const order = createWaitingApprovalOrder('os-1');
       const orderRepo = new InMemoryServiceOrderRepository().seed(order);
-      const stock = new InMemoryStockService([
-        {
-          productCode: TEST_PRODUCT_CODE,
-          required: 1,
-          available: 5,
-        },
-      ]);
-      const uc = new ApproveBudgetUseCase(orderRepo, stock);
+      const events = new SpyEventPublisher();
+      const uc = new ApproveBudgetUseCase(orderRepo, events);
 
       const updated = await uc.execute('os-1');
 
-      expect(updated.status).toBe(ServiceOrderStatus.IN_EXECUTION);
+      expect(updated.status).toBe(ServiceOrderStatus.WAITING_APPROVAL);
       expect(updated.budget?.approved).toBe(true);
-      expect(stock.decreased).toEqual([
-        { productCode: TEST_PRODUCT_CODE, quantity: 1 },
-      ]);
+      expect(events.events).toHaveLength(1);
+      expect(events.events[0].type).toBe('order.budget.approved');
     });
 
     it('é idempotente quando OS já está em execução', async () => {
       const order = createInExecutionOrder('os-1');
       const orderRepo = new InMemoryServiceOrderRepository().seed(order);
-      const stock = new InMemoryStockService();
-      const uc = new ApproveBudgetUseCase(orderRepo, stock);
+      const events = new SpyEventPublisher();
+      const uc = new ApproveBudgetUseCase(orderRepo, events);
 
       const updated = await uc.execute('os-1');
 
       expect(updated.status).toBe(ServiceOrderStatus.IN_EXECUTION);
-      expect(stock.decreased).toHaveLength(0);
-    });
-
-    it('retorna conflito quando não há estoque suficiente', async () => {
-      const order = createWaitingApprovalOrder('os-1');
-      const orderRepo = new InMemoryServiceOrderRepository().seed(order);
-      const stock = new InMemoryStockService([
-        {
-          productCode: TEST_PRODUCT_CODE,
-          required: 1,
-          available: 0,
-        },
-      ]);
-      const uc = new ApproveBudgetUseCase(orderRepo, stock);
-
-      await expect(uc.execute('os-1')).rejects.toMatchObject({
-        name: 'ConflictError',
-        code: STOCK_SHORTAGE_CODE,
-      });
-      await expect(uc.execute('os-1')).rejects.toBeInstanceOf(ConflictError);
+      expect(events.events).toHaveLength(0);
     });
   });
 
@@ -491,7 +449,7 @@ describe('Service order use cases', () => {
       const orderRepo = new InMemoryServiceOrderRepository().seed(
         createWaitingApprovalOrder('os-1'),
       );
-      const uc = new RejectBudgetUseCase(orderRepo);
+      const uc = new RejectBudgetUseCase(orderRepo, new SpyEventPublisher());
 
       const updated = await uc.execute('os-1', 'Cliente recusou valores');
 

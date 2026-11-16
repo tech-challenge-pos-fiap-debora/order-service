@@ -37,6 +37,10 @@ import type {
   StockQuoteItem,
   StockServicePort,
 } from '../../../../../shared/domain/ports/stock-service.port';
+import type {
+  EventPublisherPort,
+  PublishableEvent,
+} from '../../../../../shared/domain/ports/event-publisher.port';
 import { DocumentVO } from '../../../../../shared/domain/value-objects/document.vo';
 import { Money } from '../../../../../shared/domain/value-objects/money.vo';
 import { PlateVO } from '../../../../../shared/domain/value-objects/plate.vo';
@@ -471,3 +475,12 @@ export const serviceLineStored = () => ({
     },
   ],
 });
+
+
+export class SpyEventPublisher implements EventPublisherPort {
+  readonly events: PublishableEvent[] = [];
+  publish(event: PublishableEvent): Promise<void> {
+    this.events.push(event);
+    return Promise.resolve();
+  }
+}

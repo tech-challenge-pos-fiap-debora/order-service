@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import {
   BusinessRuleViolationError,
@@ -7,21 +8,21 @@ import type { ServiceOrderRepositoryInterface } from '../../../domain/repositori
 import { SERVICE_ORDER_REPOSITORY } from '../../../domain/repositories/tokens';
 import { ServiceOrder } from '../../../domain/entities/service-order';
 import {
-  STOCK_SERVICE,
-  type StockServicePort,
-} from '../../../../shared/domain/ports/stock-service.port';
-import {
-  type StockShortageItem,
-  conflictExceptionForStockShortage,
-} from './stock-shortage';
+  EVENT_PUBLISHER,
+  type EventPublisherPort,
+} from '../../../../shared/domain/ports/event-publisher.port';
 
+/**
+ * Aprova o orçamento e publica `order.budget.approved`.
+ * Baixa de estoque e início da execução ficam na saga (stock → billing → order).
+ */
 @Injectable()
 export class ApproveBudgetUseCase {
   constructor(
     @Inject(SERVICE_ORDER_REPOSITORY)
     private readonly orderRepo: ServiceOrderRepositoryInterface,
-    @Inject(STOCK_SERVICE)
-    private readonly stock: StockServicePort,
+    @Inject(EVENT_PUBLISHER)
+    private readonly events: EventPublisherPort,
   ) {}
 
   async execute(id: string): Promise<ServiceOrder> {
@@ -32,44 +33,29 @@ export class ApproveBudgetUseCase {
       return order;
     }
 
-    const demand = order.aggregatePartDemand();
-    const shortages = await this.getStockShortages(demand);
-    if (shortages.length > 0) {
-      throw conflictExceptionForStockShortage(shortages);
-    }
-
     try {
       order.approveBudget();
-      for (const [productCode, required] of demand.entries()) {
-        await this.stock.decreaseStock(productCode, required);
-      }
-      order.startExecution();
     } catch (e) {
       throw new BusinessRuleViolationError(
         e instanceof Error ? e.message : 'Invalid operation',
       );
     }
 
-    const saved = await this.orderRepo.save(order);
-    return saved!;
-  }
+    const saved = (await this.orderRepo.save(order))!;
 
-  private async getStockShortages(
-    demand: Map<string, number>,
-  ): Promise<StockShortageItem[]> {
-    const items = Array.from(demand.entries()).map(
-      ([productCode, required]) => ({
-        productCode,
-        required,
-      }),
-    );
-    const availability = await this.stock.getAvailability(items);
-    return availability
-      .filter((i) => i.available < i.required)
-      .map((i) => ({
-        productCode: i.productCode,
-        required: i.required,
-        available: i.available,
-      }));
+    await this.events.publish({
+      eventId: randomUUID(),
+      type: 'order.budget.approved',
+      version: 1,
+      occurredAt: new Date().toISOString(),
+      correlationId: saved.id,
+      producer: 'order-service',
+      payload: {
+        serviceOrderId: saved.id,
+        budgetId: saved.budget?.budgetId,
+      },
+    });
+
+    return saved!;
   }
 }
