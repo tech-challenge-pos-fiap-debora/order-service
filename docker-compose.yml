@@ -1,0 +1,53 @@
+services:
+  order:
+    # Imagem local com Node 22 (evita pull da Docker Hub quando o registry timeout).
+    # Para buildar pelo Dockerfile: docker compose build order
+    image: tech-challenge-api:latest
+    pull_policy: never
+    container_name: order
+    working_dir: /order
+    user: root
+    # Sem --watch: no detached o Node encerra o processo com watch + volume mount.
+    command: sh -c "yarn install --ignore-engines && node -r ts-node/register -r tsconfig-paths/register src/main.ts"
+    restart: unless-stopped
+    ports:
+      - '3003:3000'
+    depends_on:
+      order-mongo:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=development
+      - MONGODB_URI=mongodb://order-mongo:27017/order
+      - MONGODB_DB=order
+      - JWT_SECRET=${JWT_SECRET:-altere-este-segredo}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-1d}
+      - IDENTITY_SERVICE_URL=${IDENTITY_SERVICE_URL:-}
+      - STOCK_SERVICE_URL=${STOCK_SERVICE_URL:-}
+      - SERVICE_NAME=order-service
+      - NEW_RELIC_APP_NAME=${NEW_RELIC_APP_NAME:-order-service}
+      - NEW_RELIC_LABELS=${NEW_RELIC_LABELS:-service:order-service;component:order}
+      - NEW_RELIC_ENABLED=${NEW_RELIC_ENABLED:-false}
+      - PORT=3000
+    volumes:
+      - .:/order
+      - order_node_modules:/order/node_modules
+
+  order-mongo:
+    image: mongo:7
+    container_name: order-mongo
+    ports:
+      - '27018:27017'
+    environment:
+      MONGO_INITDB_DATABASE: order
+    volumes:
+      - order-mongodata:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  order-mongodata:
+  order_node_modules:

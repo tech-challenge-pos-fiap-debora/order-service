@@ -1,0 +1,194 @@
+name: CD — order-service (Kind)
+
+# Lab local no runner: sobe Kind, aplica manifests do order, smoke em
+# /health e destrói o cluster. Deploy real na AWS fica no publish-ecr.yml.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: cd-order-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SERVICE_NAME: order-service
+  CLUSTER_NAME: tech-challenge
+  NAMESPACE: tech-challenge-namespace
+  API_IMAGE: order-service:latest
+  SEED_IMAGE: order-service:seed
+  NEW_RELIC_ENABLED: 'false'
+  MONGODB_URI: mongodb://127.0.0.1:27017/order
+
+jobs:
+  test:
+    name: Testes + build (order)
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: yarn
+      - run: yarn install --frozen-lockfile
+      - run: yarn test
+      - run: yarn test:integration
+      - run: yarn build
+
+  build-images:
+    name: Build imagens Docker (order)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build imagem de produção (order API)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          tags: ${{ env.API_IMAGE }}
+          load: true
+          outputs: type=docker,dest=/tmp/order-api-image.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build imagem de seed (order)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: seed
+          tags: ${{ env.SEED_IMAGE }}
+          load: true
+          outputs: type=docker,dest=/tmp/order-seed-image.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Guardar imagens order como artefatos
+        uses: actions/upload-artifact@v4
+        with:
+          name: order-docker-images
+          path: |
+            /tmp/order-api-image.tar
+            /tmp/order-seed-image.tar
+          retention-days: 1
+
+  deploy:
+    name: Kind + deploy K8s (order)
+    runs-on: ubuntu-latest
+    needs: build-images
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Baixar imagens Docker do order
+        uses: actions/download-artifact@v4
+        with:
+          name: order-docker-images
+          path: /tmp
+
+      - name: Carregar imagens no Docker local do runner
+        run: |
+          docker load --input /tmp/order-api-image.tar
+          docker load --input /tmp/order-seed-image.tar
+          docker images | grep order-service
+
+      - name: Instalar kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.2
+
+      - name: Instalar Kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Terraform apply (cria cluster Kind + namespace + metrics-server)
+        working-directory: infra
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false
+
+      - name: Configurar KUBECONFIG
+        run: |
+          kind export kubeconfig --name "$CLUSTER_NAME"
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Carregar imagens no cluster Kind
+        run: |
+          kind load docker-image "$API_IMAGE" --name "$CLUSTER_NAME"
+          kind load docker-image "$SEED_IMAGE" --name "$CLUSTER_NAME"
+
+      - name: Aplicar config (namespace, ConfigMap, Secret)
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/secret.yaml
+
+      - name: Subir MongoDB (order-mongo)
+        run: |
+          kubectl apply -f k8s/order-mongo-pvc.yaml
+          kubectl apply -f k8s/order-mongo-service.yaml
+          kubectl apply -f k8s/order-mongo-deployment.yaml
+          kubectl rollout status deployment/order-mongo -n "$NAMESPACE" --timeout=180s
+
+      - name: Rodar seed do catálogo (Job)
+        run: |
+          kubectl delete job order-seed -n "$NAMESPACE" --ignore-not-found
+          kubectl apply -f k8s/seed-job.yaml
+          kubectl wait --for=condition=complete job/order-seed -n "$NAMESPACE" --timeout=180s \
+            || (kubectl logs job/order-seed -n "$NAMESPACE" --all-containers; exit 1)
+
+      - name: Deploy do order + HPA
+        run: |
+          kubectl apply -f k8s/order-deployment.yaml
+          kubectl apply -f k8s/order-service.yaml
+          kubectl apply -f k8s/hpa.yaml
+          kubectl rollout status deployment/order -n "$NAMESPACE" --timeout=180s
+
+      - name: Smoke test (/health + carimbo service)
+        run: |
+          kubectl port-forward svc/order 8080:80 -n "$NAMESPACE" &
+          PF_PID=$!
+          sleep 5
+          echo "== /health/live =="
+          curl -fsS http://localhost:8080/health/live | tee /tmp/live.json
+          echo
+          echo "== /health/ready =="
+          curl -fsS http://localhost:8080/health/ready | tee /tmp/ready.json
+          echo
+          kill $PF_PID || true
+          grep -q '"status":"ok"' /tmp/live.json
+          grep -q '"status":"ok"' /tmp/ready.json
+          grep -q '"service":"order-service"' /tmp/live.json
+          grep -q '"service":"order-service"' /tmp/ready.json
+
+      - name: Diagnóstico em caso de falha
+        if: failure()
+        run: |
+          kubectl get all -n "$NAMESPACE" || true
+          kubectl describe pods -n "$NAMESPACE" || true
+          kubectl logs -l app.kubernetes.io/name=order -n "$NAMESPACE" --all-containers --tail=100 || true
+
+      - name: Teardown (destrói o cluster)
+        if: always()
+        working-directory: infra
+        run: terraform destroy -auto-approve -input=false || true
