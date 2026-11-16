@@ -1,0 +1,73 @@
+name: CI — order-service
+
+# Gate de qualidade deste microsserviço: unit + integração (MongoDB order) + build.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-order-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SERVICE_NAME: order-service
+  NEW_RELIC_ENABLED: 'false'
+  MONGODB_URI: mongodb://127.0.0.1:27017/order
+
+jobs:
+  test:
+    name: Testes + build (order)
+    runs-on: ubuntu-24.04
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: yarn
+
+      - name: Instalar dependências
+        run: yarn install --frozen-lockfile
+
+      - name: Testes unitários
+        run: yarn test
+
+      - name: Testes de integração (MongoDB order)
+        run: yarn test:integration
+
+      - name: Build
+        run: yarn build
+
+      - name: Análise SonarCloud
+        uses: SonarSource/sonarqube-scan-action@v8
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Quality Gate SonarCloud
+        uses: SonarSource/sonarqube-quality-gate-action@v1.2.1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Upload coverage (order-service)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: order-service-coverage
+          path: coverage/
+          retention-days: 7
+          if-no-files-found: ignore
