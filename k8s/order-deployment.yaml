@@ -26,10 +26,11 @@ spec:
             - sh
             - -c
             - until nc -z order-mongo 27017; do echo "aguardando order-mongo..."; sleep 2; done
+
       containers:
         - name: order
           image: order-service:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - containerPort: 3000
               name: http
@@ -38,6 +39,25 @@ spec:
                 name: order-config
             - secretRef:
                 name: order-secret
+          env:
+            - name: NEW_RELIC_METADATA_KUBERNETES_CLUSTER_NAME
+              value: tech-challenge-prod
+            - name: NEW_RELIC_METADATA_KUBERNETES_NAMESPACE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NEW_RELIC_METADATA_KUBERNETES_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NEW_RELIC_METADATA_KUBERNETES_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NEW_RELIC_METADATA_KUBERNETES_DEPLOYMENT_NAME
+              value: order
+            - name: NEW_RELIC_METADATA_KUBERNETES_CONTAINER_NAME
+              value: order
           livenessProbe:
             httpGet:
               path: /health/live

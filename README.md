@@ -51,29 +51,49 @@ Auth: JWT emitido pelo **identity-service** (mesmo `JWT_SECRET`). Este MS só va
 ## Rodando local
 
 ```bash
+docker network create oficina-net 2>/dev/null || true
 cp .env.example .env
-docker compose up -d order-mongo        # Mongo em localhost:27018
-node scripts/seed-mongo.mjs             # catálogo demo + índices
-yarn start:dev                          # API em http://localhost:3000 (compose: 3003)
+docker compose up -d          # order :3003, mongo :27018, order-localstack :4567
+# (opcional no host) node scripts/seed-mongo.mjs && yarn start:dev
 ```
 
-Compose: `order` em `3003:3000`, `order-mongo` (`mongo:7`) em `27018:27017`. A imagem de dev é construída pelo `Dockerfile` (`FROM node:22-bookworm`); se o pull do Node falhar, rode a API no host com `yarn start:dev`.
+Compose sobe **LocalStack próprio** (`order-localstack`, porta host **4567**): topic `oficina-domain-events`, fila `order-events`, policies SNS/SQS e FilterPolicy dos eventos que o order consome. O app publica com fan-out (`SNS_FANOUT_ENDPOINTS`) nos 3 LocalStacks (order/stock/billing). Sem `SNS_TOPIC_ARN`, o publisher fica noop.
+
+Lab completo (4 MS + rede): ver [`../README.md`](../README.md).
 
 Testes: `yarn test` (unit, cobertura mínima ~80% em `service-order` e `service-order-status`) e `yarn test:integration:docker` (usa o banco `order_integration` no Mongo da porta 27018).
 
-## Filas
+## Saga (coreografia) e mensageria
 
-Ainda **não**. HTTP. Na Saga (order ↔ stock), baixa de estoque tende a ir para fila — ainda não implementado.
+**Saga coreografada** via SNS `oficina-domain-events` + SQS `order-events` (1 broker LocalStack por domínio no lab).
+Não há orquestrador central: cada serviço reage a eventos e publica o próximo passo (ou a compensação). `correlationId` da saga = **id da OS**.
 
-## CI/CD
+| Evento consumido | Efeito na OS |
+|---|---|
+| `billing.budget.generated` | Aplica orçamento → `WAITING_APPROVAL` |
+| `billing.budget.failed` | Volta a `IN_DIAGNOSIS` |
+| `billing.payment.created` | `WAITING_PAYMENT` |
+| `billing.payment.confirmed` | `IN_EXECUTION` |
+| `billing.payment.failed` / `stock.reservation.failed` | `CANCELLED` + publica `order.cancelled` |
+
+| Evento publicado | Quando |
+|---|---|
+| `order.budget.requested` | `POST .../budget` (status `WAITING_BUDGET`) |
+| `order.budget.approved` | Aprovação do orçamento (sem baixar estoque síncrono) |
+| `order.budget.rejected` / `order.cancelled` | Reprovação ou falha da saga |
+
+Swagger: `/api`. Health: `/health/live`, `/health/ready`.
+
+## CI/CD (AWS)
+
+Deploy em **EKS** (sem Kind). MongoDB roda **in-cluster** no EKS (lab sem DocumentDB).
 
 | Workflow | Quando | O que faz |
 |---|---|---|
-| `CI — order-service` | push/PR | unit + integração (service `mongo:7`, `MONGODB_URI`) + build |
-| `CD — order-service (Kind)` | manual | lab Kind com manifests `k8s/order-*` e Job `order-seed` |
-| `Publish ECR — order-service` | push `main` | push `order-service` + `order-service-seed` |
+| `CI — order-service` | push/PR | unit + integração + build |
+| `Publish ECR — order-service` | push `main` | push ECR + dispara deploy no `infra-kubernetes` |
 
-K8s: `order`, `order-mongo`, `order-config`, `order-secret`, NodePort **30083**.
+Detalhes: [`infra/README.md`](infra/README.md).
 
 ## Observabilidade
 

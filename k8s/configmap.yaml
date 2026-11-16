@@ -13,9 +13,10 @@ data:
   SERVICE_NAME: order-service
   MONGODB_DB: order
   JWT_EXPIRES_IN: 1d
-  # Sem URL, as integrações respondem 503 com erro explícito.
-  IDENTITY_SERVICE_URL: ""
-  STOCK_SERVICE_URL: ""
+  IDENTITY_SERVICE_URL: http://identity.tech-challenge-namespace.svc.cluster.local
+  STOCK_SERVICE_URL: http://stock.tech-challenge-namespace.svc.cluster.local
+  BILLING_SERVICE_URL: http://billing.tech-challenge-namespace.svc.cluster.local
+  AWS_REGION: us-east-1
   NEW_RELIC_APP_NAME: order-service
   NEW_RELIC_LABELS: service:order-service;component:order
   NEW_RELIC_ENABLED: "true"

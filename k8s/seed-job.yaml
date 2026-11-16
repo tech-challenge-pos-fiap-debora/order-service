@@ -28,7 +28,7 @@ spec:
       containers:
         - name: seed
           image: order-service:seed
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command:
             - node
             - scripts/seed-mongo.mjs
